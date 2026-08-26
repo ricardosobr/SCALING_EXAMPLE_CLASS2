@@ -102,13 +102,21 @@ El motor de autoescalamiento aplicó la **jerarquía de 2 Ticks**:
 
 ---
 
-## 5. Conclusiones y Lecciones de Arquitectura
+## 5. Conclusiones y Aprendizajes de Arquitectura
 
-1. **La regla de los 2 ticks es el punto óptimo:**
-   - Si se escala en el **segundo 1**, la UI no permite ver el pico.
-   - Si se espera al **segundo 5**, los servidores colapsan al segundo 3 por timeouts acumulados.
-   - Reaccionar en el **segundo 2** garantiza visibilidad y salva los servidores antes del colapso.
-2. **Escalar Vertical primero ahorra complejidad:**
-   - Mantener 2 servidores más potentes (L2, L3) es más eficiente y rápido que gestionar 6 o 7 IPs distintas en la red.
-3. **Desescalar en 10 segundos evita el "Efecto Flapping":**
-   - Si un usuario refresca la página, el sistema no se vuelve loco subiendo y bajando; espera 10 segundos continuos de tranquilidad antes de apagar servidores para ahorrar dinero.
+Esta actividad nos dejó claro que el **escalamiento vertical y el horizontal no son intercambiables, sino complementarios**:
+
+1. **Jerarquía en la práctica:**  
+   En la prueba con tráfico superior a $800\text{ req/s}$ pudimos ver esto de forma directa: el clúster agotó primero los cinco niveles verticales (L1 a L5) y solo después empezó a agregar nodos, confirmando en la práctica la jerarquía que definimos en el diseño.
+
+2. **Ventajas y límites del escalamiento vertical:**  
+   Priorizar lo vertical permitió reaccionar rápido sin alterar la topología de red ni la configuración de balanceo del clúster, pero también evidenció su límite fundamental: el rendimiento crece de forma sublineal mientras el costo se duplica en cada nivel hasta $16\times$ en L5. Elegimos agotar esa vía primero solo porque el costo no era una restricción estricta de la actividad; con otro objetivo de negocio o presupuesto, esa prioridad probablemente cambiaría hacia un escalamiento horizontal temprano con instancias más pequeñas y económicas.
+
+3. **El rol del Load Balancer:**  
+   El balanceador de carga actúa como el punto de entrada desacoplado que hace viable el escalamiento horizontal. Sin un balanceador que distribuya el tráfico equitativamente entre los nodos activos e ignore los nodos degradados, agregar más servidores no aumentaría la capacidad real del sistema.
+
+4. **Efectividad de la calibración temporal:**  
+   Lo más interesante fue comprobar que la calibración temporal realmente cumple su función. Con el pico de tráfico simulado, vimos cómo la utilización subía por encima del umbral en el primer segundo y el sistema reaccionaba hasta el segundo, justo antes de llegar al tercer tick, que es cuando un nodo caería por el timeout simbólico de $3000\text{ ms}$. Esa ventana de **2 segundos** resultó ser el balance entre reaccionar tarde (y perder nodos) y reaccionar tan rápido que la sobrecarga ni se llegara a apreciar. De forma simétrica, los **10 segundos** exigidos para bajar recursos evitaron el *flapping* (oscilaciones bruscas de apagado/encendido) cuando el tráfico disminuyó, retirando primero los nodos adicionales hasta 2 y solo después reduciendo el nivel vertical hasta L1.
+
+5. **Diseño integral de políticas:**  
+   En general, la actividad nos mostró que autoescalar no es solo revisar un número aislado y reaccionar a ciegas, sino diseñar una **política completa de ingeniería**: qué métrica observar (utilización promedio de nodos activos), qué umbrales usar ($75\%$, $90\%$, $30\%$), durante cuánto tiempo sostenerlos (2s para subir, 10s para bajar) y en qué orden combinar subida y bajada. Ver esto funcionar en la simulación, con la mejora del tiempo de respuesta después de cada escalamiento, fue lo que terminó de conectar la teoría con algo real y observable.
