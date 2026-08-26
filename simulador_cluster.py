@@ -1,22 +1,20 @@
 """
-Simulador de Escalamiento de Clúster (Vertical vs Horizontal)
-==============================================================
+Simulador de Escalamiento de Clúster (Vertical vs Horizontal) con Auto-scaling y Load Balancer
+==============================================================================================
 
-Interfaz gráfica hecha con Tkinter (viene incluido con Python, no requiere
-instalar nada) que simula un clúster de nodos recibiendo tráfico/peticiones.
+Interfaz gráfica hecha con Tkinter que simula un clúster de servidores recibiendo tráfico variable,
+con un Load Balancer (Balanceador de Carga) y un motor de Auto-scaling automático jerárquico:
 
-Qué puedes hacer:
-- Ajustar el tráfico entrante (peticiones/seg) con el deslizador.
-- Simular un "pico" de tráfico repentino.
-- Ver en un panel lateral cómo "crecen" verticalmente los nodos (barras)
-  hasta tocar el techo (tope) de capacidad, y qué síntomas aparecen
-  (latencia alta, timeouts, caídas de nodo).
-- Escalar VERTICALMENTE (subir el tipo de instancia de todos los nodos)
-  hasta llegar al tope máximo simulado, momento en el cual se muestran
-  las 3 señales de "llegaste al límite vertical".
-- Escalar HORIZONTALMENTE (agregar nodos al clúster) y comparar cómo
-  cambia el tiempo de respuesta y la tolerancia a fallos.
-- Revisar un log de eventos (fallos, escalamientos, recuperaciones).
+1. Escalamiento hacia Arriba (Scale-Up Vertical primero):
+   - Reacción en el 2º tick (2s sostenidos): Permite que en el 1er tick se visualice claramente
+     el incremento de carga/barra antes de que el sistema escale en el 2º tick (previniendo la caída al 3er tick).
+   - Scale-Up Vertical: Si Utilización Promedio (U) >= 75% por 2s sostenidos -> Sube +1 nivel (L1 a L5). Cooldown: 2s.
+   - Scale-Out Horizontal: Si U >= 90% por 2s sostenidos y ya se está en L5 -> Agrega +1 nodo (hasta máx 8). Cooldown: 2s.
+
+2. Desescalamiento Continuo hacia Abajo (Scale-In Horizontal primero):
+   - Si U <= 30% por 10s sostenidos:
+     * Si Nodos > 2 -> Retira -1 nodo (Scale-In Horizontal) hasta el mínimo de 2 nodos. Cooldown: 2s.
+     * Si Nodos == 2 -> Reduce -1 nivel (Scale-Down Vertical) gradualmente de L5 a L1. Cooldown: 2s.
 
 Ejecutar con:
     python simulador_cluster.py
@@ -28,9 +26,7 @@ import random
 
 # ----------------------------------------------------------------------
 # Modelo: niveles de instancia (escalamiento vertical)
-# La capacidad crece de forma SUBLINEAL mientras el costo crece de forma
-# EXPONENCIAL -> representa la señal #2 de "el costo crece más rápido
-# que el rendimiento ganado".
+# Capacidad sublineal y costo exponencial
 # ----------------------------------------------------------------------
 CAPACIDAD_POR_NIVEL = {1: 50, 2: 90, 3: 150, 4: 210, 5: 260}
 COSTO_POR_NIVEL = {1: 1, 2: 2, 3: 4, 4: 8, 5: 16}
@@ -41,15 +37,30 @@ NOMBRE_POR_NIVEL = {
     4: "m5.4xlarge",
     5: "m5.8xlarge (máx.)",
 }
+
+NIVEL_MINIMO = 1
 NIVEL_MAXIMO = 5
+NODOS_MINIMOS = 2
 NODOS_MAXIMOS = 8
 LATENCIA_BASE_MS = 35
-TICKS_PARA_CAER = 3          # ticks seguidos sobrecargado antes de "caer"
-INTERVALO_TICK_MS = 900
+TICKS_PARA_CAER = 3          # Ticks seguidos sobrecargado (>=100%) antes de caer
+INTERVALO_TICK_MS = 1000      # 1 segundo por tick de simulación
+
+# Parámetros y umbrales de Autoescalado
+UMBRAL_UP_VERT = 0.75         # U >= 75%
+SEGUNDOS_UP_VERT = 2          # Reacción al 2do segundo (permite visualización en el 1er tick)
+COOLDOWN_VERT_SEG = 2         # 2 segundos de enfriamiento
+
+UMBRAL_OUT_HORIZ = 0.90       # U >= 90% (cuando ya está en nivel 5)
+SEGUNDOS_OUT_HORIZ = 2        # Reacción al 2do segundo en L5
+COOLDOWN_HORIZ_SEG = 2        # 2 segundos de enfriamiento
+
+UMBRAL_IN = 0.30              # U <= 30%
+SEGUNDOS_IN = 10              # 10 segundos sostenidos para desescalar
 
 
 class Nodo:
-    """Representa un nodo del clúster."""
+    """Representa un nodo individual del clúster."""
 
     def __init__(self, id_, nivel=1):
         self.id = id_
@@ -81,16 +92,25 @@ class Nodo:
 class SimuladorClusterApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Simulador de Escalamiento de Clúster")
-        self.root.geometry("1050x650")
-        self.root.minsize(950, 600)
+        self.root.title("Simulador de Clúster: Load Balancer & Auto-Scaling (Jerárquico)")
+        self.root.geometry("1120x700")
+        self.root.minsize(1020, 640)
 
         self.contador_ids = 0
         self.nodos = []
         self.corriendo = True
         self.pico_restante = 0
 
-        self._crear_nodos_iniciales(3)
+        # Estado del motor de Autoescalado
+        self.autoescalado_activo = tk.BooleanVar(value=True)
+        self.segundos_sobrecarga_75 = 0
+        self.segundos_sobrecarga_90 = 0
+        self.segundos_subutilizado_30 = 0
+        self.cooldown_vertical = 0
+        self.cooldown_horizontal = 0
+        self._alerta_limite_max_avisada = False
+
+        self._crear_nodos_iniciales(NODOS_MINIMOS)
         self._construir_interfaz()
         self._reiniciar_estado()
 
@@ -104,7 +124,7 @@ class SimuladorClusterApp:
         self.contador_ids = 0
         for _ in range(cantidad):
             self.contador_ids += 1
-            self.nodos.append(Nodo(self.contador_ids, nivel=1))
+            self.nodos.append(Nodo(self.contador_ids, nivel=NIVEL_MINIMO))
 
     # ------------------------------------------------------------------
     # Construcción de la interfaz
@@ -116,72 +136,78 @@ class SimuladorClusterApp:
         except tk.TclError:
             pass
 
-        # --- Panel superior: controles ---
+        # --- Panel superior: controles y comandos ---
         panel_controles = ttk.Frame(self.root, padding=10)
         panel_controles.pack(side=tk.TOP, fill=tk.X)
 
-        ttk.Label(panel_controles, text="Tráfico entrante (peticiones/seg):").grid(
-            row=0, column=0, sticky="w"
-        )
-        self.trafico_var = tk.DoubleVar(value=60)
+        # Fila 0: Tráfico y Control de Autoescalado
+        frame_fila0 = ttk.Frame(panel_controles)
+        frame_fila0.pack(fill=tk.X, pady=(0, 6))
+
+        ttk.Label(frame_fila0, text="Tráfico entrante (req/s):").pack(side=tk.LEFT, padx=(0, 5))
+        self.trafico_var = tk.DoubleVar(value=70)
         self.slider_trafico = ttk.Scale(
-            panel_controles,
+            frame_fila0,
             from_=0,
-            to=1000,
+            to=1200,
             variable=self.trafico_var,
             orient=tk.HORIZONTAL,
             length=260,
         )
-        self.slider_trafico.grid(row=0, column=1, padx=8)
+        self.slider_trafico.pack(side=tk.LEFT, padx=5)
 
-        self.label_trafico_valor = ttk.Label(panel_controles, text="60 req/s", width=10)
-        self.label_trafico_valor.grid(row=0, column=2, sticky="w")
+        self.label_trafico_valor = ttk.Label(frame_fila0, text="70 req/s", width=10, font=("TkDefaultFont", 9, "bold"))
+        self.label_trafico_valor.pack(side=tk.LEFT, padx=(0, 10))
         self.trafico_var.trace_add("write", self._on_trafico_change)
 
         ttk.Button(
-            panel_controles, text="⚡ Simular pico de tráfico", command=self.simular_pico
-        ).grid(row=0, column=3, padx=10)
+            frame_fila0, text="⚡ Simular pico de tráfico", command=self.simular_pico
+        ).pack(side=tk.LEFT, padx=5)
 
-        ttk.Button(
-            panel_controles, text="🔼 Escalar verticalmente", command=self.escalar_vertical
-        ).grid(row=0, column=4, padx=6)
-
-        ttk.Button(
-            panel_controles, text="➕ Escalar horizontalmente", command=self.escalar_horizontal
-        ).grid(row=0, column=5, padx=6)
-
-        ttk.Button(
-            panel_controles, text="🛠 Reparar nodos caídos", command=self.reparar_nodos
-        ).grid(row=0, column=6, padx=6)
-
-        self.btn_pausa = ttk.Button(
-            panel_controles, text="⏸ Pausar", command=self.alternar_pausa
+        self.chk_auto = ttk.Checkbutton(
+            frame_fila0,
+            text="🤖 Auto-scaling Automático",
+            variable=self.autoescalado_activo,
+            command=self._on_toggle_autoescalado,
         )
-        self.btn_pausa.grid(row=0, column=7, padx=6)
+        self.chk_auto.pack(side=tk.LEFT, padx=15)
 
-        ttk.Button(
-            panel_controles, text="🔄 Reiniciar simulación", command=self.reiniciar_todo
-        ).grid(row=0, column=8, padx=6)
+        # Fila 1: Botones de control manual y operaciones del clúster
+        frame_fila1 = ttk.Frame(panel_controles)
+        frame_fila1.pack(fill=tk.X, pady=(2, 0))
 
-        # --- Panel central: canvas de nodos (crecimiento vertical) ---
+        ttk.Label(frame_fila1, text="Acciones manuales:").pack(side=tk.LEFT, padx=(0, 5))
+
+        ttk.Button(frame_fila1, text="🔼 Escalar V (+1)", command=self.escalar_vertical).pack(side=tk.LEFT, padx=3)
+        ttk.Button(frame_fila1, text="🔽 Desescalar V (-1)", command=self.desescalar_vertical).pack(side=tk.LEFT, padx=3)
+        ttk.Button(frame_fila1, text="➕ Escalar H (+1)", command=self.escalar_horizontal).pack(side=tk.LEFT, padx=3)
+        ttk.Button(frame_fila1, text="➖ Desescalar H (-1)", command=self.desescalar_horizontal).pack(side=tk.LEFT, padx=3)
+        ttk.Button(frame_fila1, text="🛠 Reparar caídos", command=self.reparar_nodos).pack(side=tk.LEFT, padx=6)
+
+        self.btn_pausa = ttk.Button(frame_fila1, text="⏸ Pausar", command=self.alternar_pausa)
+        self.btn_pausa.pack(side=tk.LEFT, padx=4)
+
+        ttk.Button(frame_fila1, text="🔄 Reiniciar", command=self.reiniciar_todo).pack(side=tk.LEFT, padx=4)
+
+        # --- Panel central: canvas de nodos ---
         panel_central = ttk.Frame(self.root, padding=(10, 0, 10, 10))
         panel_central.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         ttk.Label(
             panel_central,
-            text="Crecimiento vertical de los nodos (barra = % de capacidad usada)",
+            text="Clúster de Servidores (Load Balancer distribuye la carga entre nodos activos)",
             font=("TkDefaultFont", 10, "bold"),
         ).pack(anchor="w")
 
-        self.canvas = tk.Canvas(panel_central, bg="#101418", height=430)
+        self.canvas = tk.Canvas(panel_central, bg="#101418", height=450)
         self.canvas.pack(fill=tk.BOTH, expand=True, pady=(5, 0))
 
         # --- Panel lateral derecho: métricas + log ---
-        panel_lateral = ttk.Frame(self.root, padding=(0, 0, 10, 10), width=340)
+        panel_lateral = ttk.Frame(self.root, padding=(0, 0, 10, 10), width=370)
         panel_lateral.pack(side=tk.RIGHT, fill=tk.Y)
         panel_lateral.pack_propagate(False)
 
-        marco_metricas = ttk.LabelFrame(panel_lateral, text="Estado del clúster", padding=10)
+        marco_metricas = ttk.LabelFrame(panel_lateral, text="Estado del clúster y métricas", padding=10)
         marco_metricas.pack(fill=tk.X, pady=(0, 8))
 
         self.label_estado = ttk.Label(
@@ -189,8 +215,18 @@ class SimuladorClusterApp:
         )
         self.label_estado.pack(anchor="w")
 
+        self.label_utilizacion = ttk.Label(
+            marco_metricas, text="Utilización promedio (U): --%", font=("TkDefaultFont", 10, "bold")
+        )
+        self.label_utilizacion.pack(anchor="w", pady=(3, 0))
+
+        self.label_auto_info = ttk.Label(
+            marco_metricas, text="Auto-scaler: Activo · Estable", foreground="#4caf50"
+        )
+        self.label_auto_info.pack(anchor="w", pady=(2, 4))
+
         self.label_rt = ttk.Label(marco_metricas, text="Tiempo de respuesta promedio: -- ms")
-        self.label_rt.pack(anchor="w", pady=(4, 0))
+        self.label_rt.pack(anchor="w")
 
         self.label_nivel = ttk.Label(marco_metricas, text="Nivel vertical: L1 (m5.large)")
         self.label_nivel.pack(anchor="w")
@@ -198,7 +234,7 @@ class SimuladorClusterApp:
         self.label_costo = ttk.Label(marco_metricas, text="Costo relativo: x1")
         self.label_costo.pack(anchor="w")
 
-        self.label_nodos = ttk.Label(marco_metricas, text="Nodos activos: 3 / 3")
+        self.label_nodos = ttk.Label(marco_metricas, text="Nodos activos: 2 / 2")
         self.label_nodos.pack(anchor="w")
 
         self.label_capacidad = ttk.Label(marco_metricas, text="Capacidad total: -- req/s")
@@ -207,7 +243,7 @@ class SimuladorClusterApp:
         self.label_perdida = ttk.Label(marco_metricas, text="Tráfico no atendido: 0 req/s")
         self.label_perdida.pack(anchor="w")
 
-        marco_log = ttk.LabelFrame(panel_lateral, text="Registro de eventos y síntomas", padding=5)
+        marco_log = ttk.LabelFrame(panel_lateral, text="Registro de eventos del sistema", padding=5)
         marco_log.pack(fill=tk.BOTH, expand=True)
 
         scrollbar = ttk.Scrollbar(marco_log)
@@ -216,7 +252,7 @@ class SimuladorClusterApp:
         self.texto_log = tk.Text(
             marco_log,
             wrap="word",
-            height=20,
+            height=18,
             yscrollcommand=scrollbar.set,
             bg="#1c1f24",
             fg="#e6e6e6",
@@ -227,13 +263,20 @@ class SimuladorClusterApp:
         scrollbar.config(command=self.texto_log.yview)
 
     # ------------------------------------------------------------------
-    # Utilidades de estado
+    # Utilidades de estado y log
     # ------------------------------------------------------------------
     def _reiniciar_estado(self):
         self.pico_restante = 0
-        self.trafico_var.set(60)
+        self.trafico_var.set(70)
+        self.segundos_sobrecarga_75 = 0
+        self.segundos_sobrecarga_90 = 0
+        self.segundos_subutilizado_30 = 0
+        self.cooldown_vertical = 0
+        self.cooldown_horizontal = 0
+        self._alerta_limite_max_avisada = False
         self._limpiar_log()
-        self.log("Simulación iniciada con 3 nodos, nivel L1 (m5.large).")
+        self.log(f"Simulación iniciada con {NODOS_MINIMOS} nodos en L1 ({NOMBRE_POR_NIVEL[1]}).")
+        self.log("Load Balancer y Auto-scaling activados por defecto.")
 
     def _on_trafico_change(self, *_):
         try:
@@ -241,6 +284,15 @@ class SimuladorClusterApp:
         except (tk.TclError, ValueError):
             return
         self.label_trafico_valor.config(text=f"{valor} req/s")
+
+    def _on_toggle_autoescalado(self):
+        if self.autoescalado_activo.get():
+            self.log("🤖 Auto-scaling AUTOMÁTICO activado.")
+        else:
+            self.log("🕹 Auto-scaling DESACTIVADO (modo manual).")
+            self.segundos_sobrecarga_75 = 0
+            self.segundos_sobrecarga_90 = 0
+            self.segundos_subutilizado_30 = 0
 
     def log(self, mensaje):
         self.texto_log.config(state="normal")
@@ -255,6 +307,12 @@ class SimuladorClusterApp:
 
     def nodos_activos(self):
         return [n for n in self.nodos if not n.caido]
+
+    def utilizacion_promedio(self):
+        activos = self.nodos_activos()
+        if not activos:
+            return 0.0
+        return sum(n.utilizacion() for n in activos) / len(activos)
 
     def tiempo_respuesta_promedio(self):
         activos = [n for n in self.nodos_activos() if n.tiempo_respuesta is not None]
@@ -274,25 +332,33 @@ class SimuladorClusterApp:
         base = float(self.trafico_var.get())
         if self.pico_restante > 0:
             self.pico_restante -= 1
-            return base * 2.6
+            return base * 2.5
         return base
 
     def _avanzar_estado(self):
-        self._distribuir_carga()
-        self._evaluar_nodos()
-        self._actualizar_metricas()
-        self._dibujar()
+        self._distribuir_carga()       # 1. Load Balancer reparte tráfico
+        self._evaluar_nodos()           # 2. Evaluación de métricas y fallos
+        self._evaluar_autoescalado()    # 3. Motor de autoescalado evalúa reglas
+        self._actualizar_metricas()     # 4. Actualización de interfaz
+        self._dibujar()                 # 5. Renderizado en Canvas
 
+    # ------------------------------------------------------------------
+    # 1. Load Balancer (Balanceador de carga)
+    # ------------------------------------------------------------------
     def _distribuir_carga(self):
+        """Distribuye el tráfico entrante equitativamente entre los nodos activos."""
         trafico = self._trafico_efectivo()
         activos = self.nodos_activos()
         if not activos:
             return
         carga_pareja = trafico / len(activos)
         for n in activos:
-            ruido = random.uniform(0.9, 1.1)
+            ruido = random.uniform(0.95, 1.05)
             n.carga_actual = max(0.0, carga_pareja * ruido)
 
+    # ------------------------------------------------------------------
+    # 2. Evaluación de Nodos y Síntomas
+    # ------------------------------------------------------------------
     def _evaluar_nodos(self):
         for n in self.nodos:
             if n.caido:
@@ -302,7 +368,7 @@ class SimuladorClusterApp:
                 n.tiempo_respuesta = LATENCIA_BASE_MS / max(0.02, (1 - u))
                 n.ticks_sobrecargado = 0
             else:
-                n.tiempo_respuesta = 3000  # timeout simbólico
+                n.tiempo_respuesta = 3000  # Timeout simbólico
                 n.ticks_sobrecargado += 1
 
             categoria = n.categoria()
@@ -310,12 +376,12 @@ class SimuladorClusterApp:
                 if categoria == "critico":
                     self.log(
                         f"⚠️ Nodo {n.id} (L{n.nivel}): sobrecargado al "
-                        f"{u * 100:.0f}% de su capacidad — latencia crítica / posibles timeouts."
+                        f"{u * 100:.0f}% — latencia crítica / timeouts."
                     )
                 elif categoria == "advertencia":
                     self.log(
                         f"🟡 Nodo {n.id} (L{n.nivel}): uso elevado ({u * 100:.0f}%) — "
-                        "latencia empieza a subir."
+                        "latencia en aumento."
                     )
                 elif categoria == "ok" and n.categoria_previa in ("advertencia", "critico"):
                     self.log(f"🟢 Nodo {n.id} (L{n.nivel}) volvió a niveles normales.")
@@ -324,47 +390,153 @@ class SimuladorClusterApp:
             if n.ticks_sobrecargado >= TICKS_PARA_CAER and not n.caido:
                 n.caido = True
                 self.log(
-                    f"❌ Nodo {n.id} CAYÓ: sobrecarga sostenida provocó timeouts repetidos "
-                    "y el nodo dejó de responder."
+                    f"❌ Nodo {n.id} CAYÓ: sobrecarga sostenida provocó timeouts repetidos."
                 )
 
-        # Chequeo de tope vertical
-        if (
-            self.nodos
-            and all(n.nivel >= NIVEL_MAXIMO for n in self.nodos)
-            and any(n.utilizacion() >= 1.0 for n in self.nodos_activos() or self.nodos)
-        ):
-            self._avisar_tope_vertical(silencioso=True)
-
-        # Chequeo de caída total (punto único de falla si solo hay 1 nodo)
+        # Chequeo de caída total
         if self.nodos and not self.nodos_activos():
             if not getattr(self, "_ya_avise_caida_total", False):
                 self.log("🔴 CAÍDA TOTAL DEL SERVICIO: no queda ningún nodo activo.")
-                if len(self.nodos) == 1:
-                    self.log(
-                        "   → Con un solo nodo, su caída tumba TODO el servicio "
-                        "(punto único de falla, señal #3 del límite vertical)."
-                    )
                 self._ya_avise_caida_total = True
         else:
             self._ya_avise_caida_total = False
 
+    def _recalcular_nodos_post_escalado(self):
+        """Recalcula latencias y categorías post-escalado sin avanzar ticks de sobrecarga."""
+        for n in self.nodos:
+            if n.caido:
+                continue
+            u = n.utilizacion()
+            if u < 1.0:
+                n.tiempo_respuesta = LATENCIA_BASE_MS / max(0.02, (1 - u))
+                n.ticks_sobrecargado = 0
+            else:
+                n.tiempo_respuesta = 3000
+
+    # ------------------------------------------------------------------
+    # 3. Motor de Auto-scaling (Jerarquía Estricta: Vertical -> Horizontal)
+    # ------------------------------------------------------------------
+    def _evaluar_autoescalado(self):
+        """Evalúa las reglas de decisión de autoescalamiento jerárquico."""
+        if not self.autoescalado_activo.get():
+            return
+
+        activos = self.nodos_activos()
+        if not activos:
+            return
+
+        # Decrementar cooldowns activos
+        if self.cooldown_vertical > 0:
+            self.cooldown_vertical -= 1
+        if self.cooldown_horizontal > 0:
+            self.cooldown_horizontal -= 1
+
+        u = self.utilizacion_promedio()
+        nivel_actual = self.nodos[0].nivel if self.nodos else 1
+        num_nodos = len(self.nodos)
+
+        # 1. Monitoreo y acumulación de tiempo sostenido
+        if u >= UMBRAL_UP_VERT:
+            self.segundos_sobrecarga_75 += 1
+            self.segundos_subutilizado_30 = 0
+            if nivel_actual >= NIVEL_MAXIMO and u >= UMBRAL_OUT_HORIZ:
+                self.segundos_sobrecarga_90 += 1
+            else:
+                self.segundos_sobrecarga_90 = 0
+        elif u <= UMBRAL_IN:
+            self.segundos_subutilizado_30 += 1
+            self.segundos_sobrecarga_75 = 0
+            self.segundos_sobrecarga_90 = 0
+        else:
+            # Zona estable (30% < U < 75%)
+            self.segundos_sobrecarga_75 = 0
+            self.segundos_sobrecarga_90 = 0
+            self.segundos_subutilizado_30 = 0
+
+        # --- A. REGLA SCALE-UP VERTICAL PRIMERO (al 2do tick sostenido >= 75%) ---
+        if self.segundos_sobrecarga_75 >= SEGUNDOS_UP_VERT:
+            if nivel_actual < NIVEL_MAXIMO:
+                if self.cooldown_vertical == 0:
+                    self.escalar_vertical(automatico=True)
+                    self.cooldown_vertical = COOLDOWN_VERT_SEG
+                    self.segundos_sobrecarga_75 = 0
+                    self.segundos_sobrecarga_90 = 0
+            else:
+                # Ya en Nivel 5: evaluar escalamiento HORIZONTAL (al 2do tick sostenido >= 90%)
+                if self.segundos_sobrecarga_90 >= SEGUNDOS_OUT_HORIZ:
+                    if num_nodos < NODOS_MAXIMOS:
+                        if self.cooldown_horizontal == 0:
+                            self.escalar_horizontal(automatico=True)
+                            self.cooldown_horizontal = COOLDOWN_HORIZ_SEG
+                            self.segundos_sobrecarga_75 = 0
+                            self.segundos_sobrecarga_90 = 0
+                    else:
+                        if not self._alerta_limite_max_avisada:
+                            self.log("🚨 LÍMITE MÁXIMO ALCANZADO: Nivel 5 con 8 nodos y U >= 90%. Clúster al tope.")
+                            self._alerta_limite_max_avisada = True
+
+        # --- B. REGLA DESESCALAMIENTO CONTINUO HACIA ABAJO (al 10mo tick sostenido <= 30%) ---
+        if self.segundos_subutilizado_30 >= SEGUNDOS_IN:
+            if num_nodos > NODOS_MINIMOS:
+                if self.cooldown_horizontal == 0:
+                    self.desescalar_horizontal(automatico=True)
+                    self.cooldown_horizontal = COOLDOWN_HORIZ_SEG
+                    self.segundos_subutilizado_30 = 0
+            else:
+                # Nodos == 2 (mínimo de redundancia): desescalar verticalmente hacia L1
+                if nivel_actual > NIVEL_MINIMO:
+                    if self.cooldown_vertical == 0:
+                        self.desescalar_vertical(automatico=True)
+                        self.cooldown_vertical = COOLDOWN_VERT_SEG
+                        self.segundos_subutilizado_30 = 0
+
+    # ------------------------------------------------------------------
+    # Métricas y actualización de UI
+    # ------------------------------------------------------------------
     def _actualizar_metricas(self):
         activos = self.nodos_activos()
         rt = self.tiempo_respuesta_promedio()
+        u = self.utilizacion_promedio()
 
         if not self.nodos or not activos:
             estado_txt, color = "🔴 CAÍDA TOTAL", "#ff5555"
         elif any(n.caido for n in self.nodos):
             estado_txt, color = "🟠 DEGRADADO (nodo caído)", "#ffb454"
-        elif any(n.utilizacion() >= 1.0 for n in activos):
-            estado_txt, color = "🔴 CRÍTICO", "#ff5555"
-        elif any(n.utilizacion() >= 0.6 for n in activos):
-            estado_txt, color = "🟡 ADVERTENCIA", "#ffd54f"
+        elif u >= 1.0 or any(n.utilizacion() >= 1.0 for n in activos):
+            estado_txt, color = "🔴 CRÍTICO (Sobrecarga)", "#ff5555"
+        elif u >= 0.75:
+            estado_txt, color = "🟡 ADVERTENCIA (Alta carga)", "#ffd54f"
         else:
             estado_txt, color = "🟢 SALUDABLE", "#7ee787"
 
         self.label_estado.config(text=estado_txt, foreground=color)
+        self.label_utilizacion.config(text=f"Utilización promedio (U): {u * 100:.1f}%")
+
+        # Texto informativo del auto-scaler
+        if not self.autoescalado_activo.get():
+            info_auto = "Auto-scaler: DESACTIVADO (Manual)"
+            color_auto = "#888888"
+        elif self.cooldown_vertical > 0:
+            info_auto = f"Auto-scaler: ❄ Cooldown Vertical ({self.cooldown_vertical}s)"
+            color_auto = "#64b5f6"
+        elif self.cooldown_horizontal > 0:
+            info_auto = f"Auto-scaler: ❄ Cooldown Horizontal ({self.cooldown_horizontal}s)"
+            color_auto = "#64b5f6"
+        elif self.segundos_sobrecarga_90 > 0:
+            info_auto = f"Auto-scaler: 🔼 Evaluando Scale-Out L5 ({self.segundos_sobrecarga_90}/{SEGUNDOS_OUT_HORIZ}s)"
+            color_auto = "#ffb74d"
+        elif self.segundos_sobrecarga_75 > 0:
+            info_auto = f"Auto-scaler: 🔼 Evaluando Scale-Up V ({self.segundos_sobrecarga_75}/{SEGUNDOS_UP_VERT}s)"
+            color_auto = "#ffb74d"
+        elif self.segundos_subutilizado_30 > 0:
+            info_auto = f"Auto-scaler: 🔽 Evaluando Desescalado ({self.segundos_subutilizado_30}/{SEGUNDOS_IN}s)"
+            color_auto = "#81c784"
+        else:
+            info_auto = "Auto-scaler: 🤖 Activo · Estable"
+            color_auto = "#7ee787"
+
+        self.label_auto_info.config(text=info_auto, foreground=color_auto)
+
         self.label_rt.config(
             text=f"Tiempo de respuesta promedio: {'SIN SERVICIO' if rt is None else f'{rt:.0f} ms'}"
         )
@@ -380,12 +552,11 @@ class SimuladorClusterApp:
         self.label_capacidad.config(text=f"Capacidad total activa: {capacidad_total:.0f} req/s")
 
         trafico_solicitado = float(self.trafico_var.get())
-        atendido = min(trafico_solicitado, capacidad_total)
         perdida = max(0.0, trafico_solicitado - capacidad_total)
         self.label_perdida.config(text=f"Tráfico no atendido: {perdida:.0f} req/s")
 
     # ------------------------------------------------------------------
-    # Dibujo del canvas (crecimiento vertical de nodos)
+    # Dibujo del canvas
     # ------------------------------------------------------------------
     def _dibujar(self):
         self.canvas.delete("all")
@@ -406,6 +577,16 @@ class SimuladorClusterApp:
             ancho - 90, tope_y - 12, text="TOPE (100%)", fill="#e05252", font=("TkDefaultFont", 9, "bold")
         )
 
+        # Líneas de referencia de umbrales
+        y_75 = base_y - (0.75 * area_altura)
+        y_30 = base_y - (0.30 * area_altura)
+
+        self.canvas.create_line(10, y_75, ancho - 10, y_75, fill="#ffb74d", dash=(2, 4), width=1)
+        self.canvas.create_text(60, y_75 - 8, text="Umbral Up (75%)", fill="#ffb74d", font=("TkDefaultFont", 8))
+
+        self.canvas.create_line(10, y_30, ancho - 10, y_30, fill="#81c784", dash=(2, 4), width=1)
+        self.canvas.create_text(60, y_30 - 8, text="Umbral Down (30%)", fill="#81c784", font=("TkDefaultFont", 8))
+
         n = max(len(self.nodos), 1)
         ancho_disponible = ancho - 20
         ancho_barra = min(90, (ancho_disponible / n) - 20)
@@ -417,7 +598,7 @@ class SimuladorClusterApp:
             x1 = centro_x + ancho_barra / 2
 
             u = nodo.utilizacion()
-            u_dibujo = min(u, 1.35)  # permite ver "desborde" sobre el tope
+            u_dibujo = min(u, 1.35)
             altura_barra = u_dibujo * area_altura
             y0 = base_y - altura_barra
 
@@ -425,8 +606,10 @@ class SimuladorClusterApp:
                 color = "#555c66"
             elif u >= 1.0:
                 color = "#e04b4b"
-            elif u >= 0.6:
+            elif u >= 0.75:
                 color = "#e0b23c"
+            elif u <= 0.30:
+                color = "#4ba3e0"
             else:
                 color = "#3ca66b"
 
@@ -467,11 +650,11 @@ class SimuladorClusterApp:
             )
 
     # ------------------------------------------------------------------
-    # Acciones de usuario
+    # Acciones de escalamiento y operaciones
     # ------------------------------------------------------------------
     def simular_pico(self):
         self.pico_restante = 6
-        self.log("⚡ Pico de tráfico simulado (~2.6x durante unos segundos).")
+        self.log("⚡ Pico de tráfico simulado (~2.5x durante 6 segundos).")
 
     def alternar_pausa(self):
         self.corriendo = not self.corriendo
@@ -486,72 +669,119 @@ class SimuladorClusterApp:
                 n.categoria_previa = "ok"
                 reparados += 1
         if reparados:
-            self.log(f"🛠 Se repararon {reparados} nodo(s) caído(s) manualmente.")
+            self.log(f"🛠 Se repararon {reparados} nodo(s) caído(s).")
         else:
             self.log("🛠 No había nodos caídos que reparar.")
 
     def reiniciar_todo(self):
-        self._crear_nodos_iniciales(3)
+        self._crear_nodos_iniciales(NODOS_MINIMOS)
         self._reiniciar_estado()
         self._actualizar_metricas()
         self._dibujar()
 
-    def escalar_vertical(self):
+    def escalar_vertical(self, automatico=False):
         if all(n.nivel >= NIVEL_MAXIMO for n in self.nodos):
-            self._avisar_tope_vertical(silencioso=False)
+            if not automatico:
+                self._avisar_tope_vertical(silencioso=False)
             return
 
         antes = self.tiempo_respuesta_promedio()
         for n in self.nodos:
             if n.nivel < NIVEL_MAXIMO:
                 n.nivel += 1
-            n.caido = False
             n.ticks_sobrecargado = 0
             n.categoria_previa = "ok"
 
         self._distribuir_carga()
-        self._evaluar_nodos()
+        self._recalcular_nodos_post_escalado()
         self._actualizar_metricas()
         self._dibujar()
         despues = self.tiempo_respuesta_promedio()
 
         nivel_actual = self.nodos[0].nivel
+        origen = "🤖 Auto-scaling [Scale-Up]" if automatico else "🔼 Escalamiento VERTICAL (manual)"
         self.log(
-            f"🔼 Escalamiento VERTICAL aplicado → todos los nodos ahora en "
-            f"L{nivel_actual} ({NOMBRE_POR_NIVEL[nivel_actual]}), "
-            f"costo relativo x{COSTO_POR_NIVEL[nivel_actual]}."
+            f"{origen} → Todos los nodos suben a L{nivel_actual} "
+            f"({NOMBRE_POR_NIVEL[nivel_actual]}), costo x{COSTO_POR_NIVEL[nivel_actual]}."
         )
         self._log_comparacion_rt(antes, despues)
 
-        if nivel_actual >= NIVEL_MAXIMO:
-            self.log("🟠 Llegaste al tipo de instancia más grande disponible en este clúster.")
-
-    def escalar_horizontal(self):
-        if len(self.nodos) >= NODOS_MAXIMOS:
-            messagebox.showinfo(
-                "Límite alcanzado",
-                f"Ya tienes el máximo simulado de {NODOS_MAXIMOS} nodos en el clúster.",
-            )
+    def desescalar_vertical(self, automatico=False):
+        if all(n.nivel <= NIVEL_MINIMO for n in self.nodos):
+            if not automatico:
+                messagebox.showinfo("Límite mínimo", f"El clúster ya está en el nivel vertical mínimo L{NIVEL_MINIMO}.")
             return
 
         antes = self.tiempo_respuesta_promedio()
-        nivel_nuevo_nodo = self.nodos[0].nivel if self.nodos else 1
-        self.contador_ids += 1
-        self.nodos.append(Nodo(self.contador_ids, nivel=nivel_nuevo_nodo))
+        for n in self.nodos:
+            if n.nivel > NIVEL_MINIMO:
+                n.nivel -= 1
+            n.ticks_sobrecargado = 0
+            n.categoria_previa = "ok"
 
         self._distribuir_carga()
-        self._evaluar_nodos()
+        self._recalcular_nodos_post_escalado()
         self._actualizar_metricas()
         self._dibujar()
         despues = self.tiempo_respuesta_promedio()
 
-        self.log(f"➕ Escalamiento HORIZONTAL aplicado → nodos en el clúster: {len(self.nodos)}.")
+        nivel_actual = self.nodos[0].nivel
+        origen = "🤖 Auto-scaling [Scale-Down]" if automatico else "🔽 Desescalamiento VERTICAL (manual)"
+        self.log(
+            f"{origen} → Nivel reducido a L{nivel_actual} "
+            f"({NOMBRE_POR_NIVEL[nivel_actual]}), costo x{COSTO_POR_NIVEL[nivel_actual]}."
+        )
         self._log_comparacion_rt(antes, despues)
-        if len(self.nodos) >= 2:
-            self.log(
-                "✅ Mayor tolerancia a fallos: si un nodo cae, los demás siguen "
-                "atendiendo peticiones."
-            )
+
+    def escalar_horizontal(self, automatico=False):
+        if len(self.nodos) >= NODOS_MAXIMOS:
+            if not automatico:
+                messagebox.showinfo(
+                    "Límite alcanzado",
+                    f"Ya tienes el máximo simulado de {NODOS_MAXIMOS} nodos en el clúster.",
+                )
+            return
+
+        antes = self.tiempo_respuesta_promedio()
+        nivel_nuevo_nodo = self.nodos[0].nivel if self.nodos else NIVEL_MINIMO
+        self.contador_ids += 1
+        self.nodos.append(Nodo(self.contador_ids, nivel=nivel_nuevo_nodo))
+
+        for n in self.nodos:
+            n.ticks_sobrecargado = 0
+            n.categoria_previa = "ok"
+
+        self._distribuir_carga()
+        self._recalcular_nodos_post_escalado()
+        self._actualizar_metricas()
+        self._dibujar()
+        despues = self.tiempo_respuesta_promedio()
+
+        origen = "🤖 Auto-scaling [Scale-Out]" if automatico else "➕ Escalamiento HORIZONTAL (manual)"
+        self.log(f"{origen} → Nodo {self.contador_ids} añadido. Nodos en el clúster: {len(self.nodos)}.")
+        self._log_comparacion_rt(antes, despues)
+
+    def desescalar_horizontal(self, automatico=False):
+        if len(self.nodos) <= NODOS_MINIMOS:
+            if not automatico:
+                messagebox.showinfo(
+                    "Límite mínimo",
+                    f"El clúster ya está en el mínimo seguro de {NODOS_MINIMOS} nodos.",
+                )
+            return
+
+        antes = self.tiempo_respuesta_promedio()
+        nodo_removido = self.nodos.pop()
+
+        self._distribuir_carga()
+        self._recalcular_nodos_post_escalado()
+        self._actualizar_metricas()
+        self._dibujar()
+        despues = self.tiempo_respuesta_promedio()
+
+        origen = "🤖 Auto-scaling [Scale-In]" if automatico else "➖ Desescalamiento HORIZONTAL (manual)"
+        self.log(f"{origen} → Retirado Nodo {nodo_removido.id}. Nodos restantes: {len(self.nodos)}.")
+        self._log_comparacion_rt(antes, despues)
 
     def _log_comparacion_rt(self, antes, despues):
         txt_antes = "SIN SERVICIO" if antes is None else f"{antes:.0f} ms"
@@ -566,16 +796,13 @@ class SimuladorClusterApp:
 
         mensaje = (
             "Señales de que llegaste al límite de escalamiento vertical:\n\n"
-            "1. Ya estás en el tipo de instancia más grande disponible.\n"
-            "2. El costo empieza a crecer más rápido que el rendimiento que ganas "
-            "(no es lineal).\n"
-            "3. Un solo servidor caído tumba todo el servicio (sigues teniendo un "
-            "único punto de falla).\n\n"
-            "Considera escalar HORIZONTALMENTE para seguir creciendo."
+            "1. Ya estás en el tipo de instancia más grande disponible (L5).\n"
+            "2. El costo crece más rápido que el rendimiento.\n"
+            "3. Se activa el escalamiento HORIZONTAL para seguir creciendo si la carga >= 90%."
         )
         if not silencioso:
             messagebox.showwarning("Tope de escalamiento vertical alcanzado", mensaje)
-        self.log("🚫 TOPE VERTICAL ALCANZADO: " + mensaje.replace("\n", " "))
+        self.log("🚫 TOPE VERTICAL: " + mensaje.replace("\n", " "))
 
 
 def main():
