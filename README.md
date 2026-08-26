@@ -1,69 +1,103 @@
-# Simulador de Clúster: Load Balancer & Auto-Scaling Jerárquico
+# 💻 Simulador de Clúster: Load Balancer & Auto-Scaling Jerárquico
 
-Simulador interactivo de arquitectura de servidores y computación distribuida con interfaz gráfica en **Tkinter**. Permite visualizar y experimentar en tiempo real el comportamiento de un clúster bajo diferentes cargas de tráfico, con un **Balanceador de Carga (Load Balancer)** y un motor de **Autoescalamiento Automático** con calibración en 2 ticks.
+> **Simulador interactivo y didáctico de computación en la nube y arquitectura de servidores.**  
+> Diseñado para que cualquier estudiante de preparatoria o universidad pueda experimentar en vivo cómo funcionan los sistemas detrás de plataformas como **Netflix, Ticketmaster o AWS**.
 
 ---
 
-## 🚀 Inicio Rápido
+## 🍕 ¿Cómo entender esto de forma simple? (La Analogía de la Pizzería)
+
+Imagina que tienes una pizzería que atiende pedidos en línea:
+
+```
+🍕 Tráfico (req/s)          = Clientes pidiendo pizzas por segundo
+👨‍🍳 Load Balancer (Cajero)  = Quien reparte las comandas de forma pareja entre los hornos
+🔥 Servidores (Nodos)       = Los hornos de pizza disponibles
+⚡ Nivel de Instancia (L1-L5)= El tamaño y potencia del horno
+```
+
+- **Escalamiento Vertical (Subir de nivel L1 $\rightarrow$ L5):**  
+  *Cambias tu horno pequeño por un superhorno industrial.* Ocupa el mismo espacio en tu cocina, pero llega un punto en que no existe un horno más grande en el mercado (Tope Nivel 5).
+- **Escalamiento Horizontal (Añadir servidores 2 $\rightarrow$ 8):**  
+  *Compras más hornos y los pones en batería.* Puedes crecer casi sin límite, pero necesitas que el cajero (**Load Balancer**) reparta los pedidos para que ningún horno se queme solo.
+- **Desescalamiento Continuo (Scale-In $\rightarrow$ Scale-Down):**  
+  *Cuando los clientes se van:* primero apagas y guardas los hornos extras que gastan gas innecesariamente (**Scale-In**), y cuando solo te quedan tus 2 hornos base, los bajas a fuego mínimo (**Scale-Down**) para no pagar de más en el recibo de luz.
+
+---
+
+## 🚀 Inicio Rápido (Cómo Ejecutarlo)
 
 ### Requisitos
-- **Python 3.8+** (Tkinter viene incluido por defecto con Python en Windows, macOS y la mayoría de distribuciones Linux).
-- En Linux (Debian/Ubuntu/Arch) si no tienes Tkinter instalado:
+- **Python 3.8 o superior** (Tkinter ya viene incluido por defecto en Windows, macOS y la mayoría de Linux).
+- En Linux (si no tienes Tkinter):
   ```bash
   sudo apt install python3-tk    # Ubuntu/Debian
   sudo pacman -S tk              # Arch Linux
   ```
 
-### Ejecución
+### Clonar y Ejecutar
 ```bash
+# 1. Clonar el repositorio
 git clone https://github.com/ricardosobr/SCALING_EXAMPLE_CLASS2.git
+
+# 2. Entrar a la carpeta
 cd SCALING_EXAMPLE_CLASS2
+
+# 3. Iniciar el simulador
 python simulador_cluster.py
 ```
 
 ---
 
-## 🎯 Características Principales
+## 🎮 Controles y Elementos del Simulador
 
-1. **Balanceador de Carga (Load Balancer):**
-   - Distribuye el tráfico entrante ($req/s$) equitativamente entre los nodos activos (`nodos_activos()`).
-   - Tolera fallos en tiempo real: si un nodo cae por sobrecarga, redirige el tráfico a los nodos vivos.
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│ [ Slider de Tráfico ]  [ 🎟 Simular Preventa ]  [ 🟢 Auto-scaling: ACTIVADO (Toggle) ] │
+├────────────────────────────────────────┬───────────────────────────────────────────────┤
+│                                        │ 📊 Panel de Métricas:                         │
+│   CANVAS VISUAL DE SERVIDORES          │ • Estado: 🟢 Saludable / 🔴 Crítico           │
+│                                        │ • Utilización Promedio (U): 65%               │
+│   [ Servidor 1 ]      [ Servidor 2 ]   │ • Nivel: L1 (m5.large) | Costo: x1            │
+│   ┌────────────┐      ┌────────────┐   │ • Tiempo de respuesta: 55 ms                  │
+│   │    70%     │      │    70%     │   ├───────────────────────────────────────────────┤
+│   │   Verde    │      │   Verde    │   │ 📝 Bitácora en Vivo:                          │
+│   └────────────┘      └────────────┘   │ • [10:00:02] Auto-scaling [Scale-Up] -> L2    │
+└────────────────────────────────────────┴───────────────────────────────────────────────┘
+```
 
-2. **Autoescalamiento Jerárquico (Vertical primero $\rightarrow$ Horizontal después):**
-   - **Scale-Up Vertical:** Si la utilización promedio ($U$) $\ge 75\%$ durante **2 segundos sostenidos**, sube el tipo de instancia (L1 $\rightarrow$ L2 $\rightarrow$ ... $\rightarrow$ L5).
-   - **Scale-Out Horizontal:** Si el clúster ya está en **Nivel 5** y la utilización persiste en $U \ge 90\%$ durante **2 segundos sostenidos**, agrega nodos adicionales (hasta un máximo de 8).
-   - **Calibración en 2 Ticks:** Permite ver visualmente el pico en el Canvas durante el 1er segundo y escala en el 2º segundo, evitando la caída de servidores (que ocurre al 3er segundo de sobrecarga).
-
-3. **Desescalamiento Continuo (Scale-In Horizontal $\rightarrow$ Scale-Down Vertical):**
-   - Cuando la carga baja a $U \le 30\%$ durante **10 segundos continuos**:
-     - Retira primero los nodos adicionales hasta llegar a la base de 2 nodos.
-     - Reduce gradualmente el nivel vertical (L5 $\rightarrow$ L4 $\rightarrow$ ... $\rightarrow$ L1).
-
-4. **Monitoreo y Métricas en Tiempo Real:**
-   - Panel lateral con métricas de utilización ($U$), tiempo de respuesta promedio ($RT$), capacidad activa, costo relativo y estado de cooldowns.
-   - Canvas interactivo que muestra las barras de carga por nodo, límites de capacidad y umbrales de escalamiento.
-   - Registro de eventos (log) con bitácora detallada de síntomas, caídas, reparaciones y escalamientos.
+1. **Botón de Auto-scaling (`🟢 ACTIVADO` / `🔴 APAGADO`):**  
+   Permite alternar entre el modo automático (el robot toma decisiones de escalado) y el modo manual (tú controlas el clúster con los botones).
+2. **Botón `🎟 Simular Preventa de Concierto`:**  
+   Inyecta un pico masivo repentino ($2.5\times$) para ver en vivo cómo el sistema rescata la página web de boletos antes de que se caiga.
+3. **La Regla de los 2 Ticks (Calibración Óptima):**
+   - **Tick 1 (Segundo 1):** Las barras de los servidores suben a rojo ($U > 100\%$) y la latencia aumenta. Esto permite al usuario ver con claridad que el tráfico aumentó.
+   - **Tick 2 (Segundo 2):** El autoescalador reacciona y sube de nivel automáticamente, rescatando los servidores **antes del 3er segundo** (que es cuando colapsan por timeout).
 
 ---
 
-## 📊 Niveles de Instancia y Costos
+## 📊 Niveles de Servidor y Costos
 
-| Nivel | Instancia | Capacidad individual | Costo relativo |
+| Nivel | Tipo de Instancia | Capacidad por Servidor | Costo Relativo |
 | :--- | :--- | :--- | :--- |
-| **L1** | `m5.large` | $50\text{ req/s}$ | $1\times$ |
-| **L2** | `m5.xlarge` | $90\text{ req/s}$ | $2\times$ |
-| **L3** | `m5.2xlarge` | $150\text{ req/s}$ | $4\times$ |
-| **L4** | `m5.4xlarge` | $210\text{ req/s}$ | $8\times$ |
-| **L5** | `m5.8xlarge (máx.)` | $260\text{ req/s}$ | $16\times$ |
+| **L1** | `m5.large` | $50\text{ peticiones/seg}$ | $1\times$ |
+| **L2** | `m5.xlarge` | $90\text{ peticiones/seg}$ | $2\times$ |
+| **L3** | `m5.2xlarge` | $150\text{ peticiones/seg}$ | $4\times$ |
+| **L4** | `m5.4xlarge` | $210\text{ peticiones/seg}$ | $8\times$ |
+| **L5** | `m5.8xlarge (Tope)` | $260\text{ peticiones/seg}$ | $16\times$ |
 
 ---
 
-## 📖 Documentación de Arquitectura y Decisiones
+## 📚 Documentación Completa del Proyecto
 
-Para consultar el análisis detallado de arquitectura, los diagramas de flujo en Mermaid, la justificación de los tiempos de reacción y el caso de estudio de las pruebas:
-👉 **[Ver ARQUITECTURA_Y_DISENO.md](ARQUITECTURA_Y_DISENO.md)**
+Todo el proyecto cuenta con documentación detallada para evaluación y consulta:
+
+- 📖 **[ARQUITECTURA_Y_DISENO.md](ARQUITECTURA_Y_DISENO.md):** Diagramas de flujo en Mermaid, diseño de la máquina de estados y justificación técnica profunda.
+- 🎟 **[CASO_DE_ESTUDIO_CONCIERTO.md](CASO_DE_ESTUDIO_CONCIERTO.md):** Caso de estudio completo de preventa de boletos (tráfico simulado, decisiones automáticas y tablas de métricas de rendimiento).
+- 🎬 **[GUION_VIDEO_DEMOSTRACION.md](GUION_VIDEO_DEMOSTRACION.md):** Guion paso a paso minuto a minuto (2–4 minutos) para la grabación de la demostración en video por **Ricardo Soberanis y Kevin**.
 
 ---
 
-## 👥 Equipo
-- Ricardo Soberanis ([@ricardosobr](https://github.com/ricardosobr))
+## 👥 Autores y Equipo
+- **Ricardo Soberanis** ([@ricardosobr](https://github.com/ricardosobr))
+- **Kevin**

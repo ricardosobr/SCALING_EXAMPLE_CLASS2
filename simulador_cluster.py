@@ -2,19 +2,17 @@
 Simulador de Escalamiento de Clúster (Vertical vs Horizontal) con Auto-scaling y Load Balancer
 ==============================================================================================
 
-Interfaz gráfica hecha con Tkinter que simula un clúster de servidores recibiendo tráfico variable,
-con un Load Balancer (Balanceador de Carga) y un motor de Auto-scaling automático jerárquico:
+Interfaz gráfica educativa e interactiva hecha con Tkinter que simula un clúster de servidores
+recibiendo tráfico en tiempo real (ej. Preventa de boletos de un concierto masivo en Ticketmaster).
 
-1. Escalamiento hacia Arriba (Scale-Up Vertical primero):
-   - Reacción en el 2º tick (2s sostenidos): Permite que en el 1er tick se visualice claramente
-     el incremento de carga/barra antes de que el sistema escale en el 2º tick (previniendo la caída al 3er tick).
-   - Scale-Up Vertical: Si Utilización Promedio (U) >= 75% por 2s sostenidos -> Sube +1 nivel (L1 a L5). Cooldown: 2s.
-   - Scale-Out Horizontal: Si U >= 90% por 2s sostenidos y ya se está en L5 -> Agrega +1 nodo (hasta máx 8). Cooldown: 2s.
-
-2. Desescalamiento Continuo hacia Abajo (Scale-In Horizontal primero):
-   - Si U <= 30% por 10s sostenidos:
-     * Si Nodos > 2 -> Retira -1 nodo (Scale-In Horizontal) hasta el mínimo de 2 nodos. Cooldown: 2s.
-     * Si Nodos == 2 -> Reduce -1 nivel (Scale-Down Vertical) gradualmente de L5 a L1. Cooldown: 2s.
+Incluye:
+1. Load Balancer (Balanceador de carga Round-Robin con tolerancia a fallos).
+2. Motor de Auto-scaling automático jerárquico con reacción en 2 Ticks:
+   - Scale-Up Vertical Primero (L1 a L5) ante sobrecarga (U >= 75% por 2s).
+   - Scale-Out Horizontal en Nivel 5 ante sobrecarga extrema (U >= 90% por 2s).
+   - Desescalamiento Continuo (Scale-In Horizontal primero -> Scale-Down Vertical después) cuando U <= 30% por 10s.
+3. Botón de Toggle Visual de Auto-scaling (Automático vs Manual).
+4. Escenario temático: "🎟 Simular Preventa de Concierto".
 
 Ejecutar con:
     python simulador_cluster.py
@@ -92,9 +90,9 @@ class Nodo:
 class SimuladorClusterApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Simulador de Clúster: Load Balancer & Auto-Scaling (Jerárquico)")
-        self.root.geometry("1120x700")
-        self.root.minsize(1020, 640)
+        self.root.title("Simulador de Clúster: Load Balancer & Auto-Scaling Jerárquico")
+        self.root.geometry("1140x720")
+        self.root.minsize(1040, 660)
 
         self.contador_ids = 0
         self.nodos = []
@@ -102,7 +100,7 @@ class SimuladorClusterApp:
         self.pico_restante = 0
 
         # Estado del motor de Autoescalado
-        self.autoescalado_activo = tk.BooleanVar(value=True)
+        self.autoescalado_activo = True
         self.segundos_sobrecarga_75 = 0
         self.segundos_sobrecarga_90 = 0
         self.segundos_subutilizado_30 = 0
@@ -144,7 +142,7 @@ class SimuladorClusterApp:
         frame_fila0 = ttk.Frame(panel_controles)
         frame_fila0.pack(fill=tk.X, pady=(0, 6))
 
-        ttk.Label(frame_fila0, text="Tráfico entrante (req/s):").pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Label(frame_fila0, text="Tráfico entrante (peticiones/seg):").pack(side=tk.LEFT, padx=(0, 5))
         self.trafico_var = tk.DoubleVar(value=70)
         self.slider_trafico = ttk.Scale(
             frame_fila0,
@@ -152,25 +150,33 @@ class SimuladorClusterApp:
             to=1200,
             variable=self.trafico_var,
             orient=tk.HORIZONTAL,
-            length=260,
+            length=250,
         )
         self.slider_trafico.pack(side=tk.LEFT, padx=5)
 
-        self.label_trafico_valor = ttk.Label(frame_fila0, text="70 req/s", width=10, font=("TkDefaultFont", 9, "bold"))
+        self.label_trafico_valor = ttk.Label(frame_fila0, text="70 req/s", width=9, font=("TkDefaultFont", 9, "bold"))
         self.label_trafico_valor.pack(side=tk.LEFT, padx=(0, 10))
         self.trafico_var.trace_add("write", self._on_trafico_change)
 
         ttk.Button(
-            frame_fila0, text="⚡ Simular pico de tráfico", command=self.simular_pico
+            frame_fila0, text="🎟 Simular Preventa de Concierto (Pico)", command=self.simular_pico_concierto
         ).pack(side=tk.LEFT, padx=5)
 
-        self.chk_auto = ttk.Checkbutton(
+        # Botón Toggle Visual de Auto-scaling
+        self.btn_toggle_auto = tk.Button(
             frame_fila0,
-            text="🤖 Auto-scaling Automático",
-            variable=self.autoescalado_activo,
-            command=self._on_toggle_autoescalado,
+            text="🟢 Auto-scaling: ACTIVADO",
+            command=self.alternar_autoescalado,
+            bg="#1b4d2e",
+            fg="#7ee787",
+            activebackground="#256e42",
+            activeforeground="#ffffff",
+            font=("TkDefaultFont", 9, "bold"),
+            relief=tk.RAISED,
+            padx=10,
+            pady=2,
         )
-        self.chk_auto.pack(side=tk.LEFT, padx=15)
+        self.btn_toggle_auto.pack(side=tk.LEFT, padx=12)
 
         # Fila 1: Botones de control manual y operaciones del clúster
         frame_fila1 = ttk.Frame(panel_controles)
@@ -187,7 +193,7 @@ class SimuladorClusterApp:
         self.btn_pausa = ttk.Button(frame_fila1, text="⏸ Pausar", command=self.alternar_pausa)
         self.btn_pausa.pack(side=tk.LEFT, padx=4)
 
-        ttk.Button(frame_fila1, text="🔄 Reiniciar", command=self.reiniciar_todo).pack(side=tk.LEFT, padx=4)
+        ttk.Button(frame_fila1, text="🔄 Reiniciar simulación", command=self.reiniciar_todo).pack(side=tk.LEFT, padx=4)
 
         # --- Panel central: canvas de nodos ---
         panel_central = ttk.Frame(self.root, padding=(10, 0, 10, 10))
@@ -203,7 +209,7 @@ class SimuladorClusterApp:
         self.canvas.pack(fill=tk.BOTH, expand=True, pady=(5, 0))
 
         # --- Panel lateral derecho: métricas + log ---
-        panel_lateral = ttk.Frame(self.root, padding=(0, 0, 10, 10), width=370)
+        panel_lateral = ttk.Frame(self.root, padding=(0, 0, 10, 10), width=380)
         panel_lateral.pack(side=tk.RIGHT, fill=tk.Y)
         panel_lateral.pack_propagate(False)
 
@@ -221,7 +227,7 @@ class SimuladorClusterApp:
         self.label_utilizacion.pack(anchor="w", pady=(3, 0))
 
         self.label_auto_info = ttk.Label(
-            marco_metricas, text="Auto-scaler: Activo · Estable", foreground="#4caf50"
+            marco_metricas, text="Auto-scaler: Activo · Estable", foreground="#4caf50", font=("TkDefaultFont", 9, "bold")
         )
         self.label_auto_info.pack(anchor="w", pady=(2, 4))
 
@@ -243,7 +249,7 @@ class SimuladorClusterApp:
         self.label_perdida = ttk.Label(marco_metricas, text="Tráfico no atendido: 0 req/s")
         self.label_perdida.pack(anchor="w")
 
-        marco_log = ttk.LabelFrame(panel_lateral, text="Registro de eventos del sistema", padding=5)
+        marco_log = ttk.LabelFrame(panel_lateral, text="Bitácora y explicación de eventos", padding=5)
         marco_log.pack(fill=tk.BOTH, expand=True)
 
         scrollbar = ttk.Scrollbar(marco_log)
@@ -274,9 +280,11 @@ class SimuladorClusterApp:
         self.cooldown_vertical = 0
         self.cooldown_horizontal = 0
         self._alerta_limite_max_avisada = False
+        self._actualizar_boton_toggle()
         self._limpiar_log()
-        self.log(f"Simulación iniciada con {NODOS_MINIMOS} nodos en L1 ({NOMBRE_POR_NIVEL[1]}).")
+        self.log(f"Simulación iniciada con {NODOS_MINIMOS} servidores en L1 ({NOMBRE_POR_NIVEL[1]}).")
         self.log("Load Balancer y Auto-scaling activados por defecto.")
+        self.log("💡 Tip: Presiona '🎟 Simular Preventa' para ver el pico de concierto en vivo.")
 
     def _on_trafico_change(self, *_):
         try:
@@ -285,14 +293,34 @@ class SimuladorClusterApp:
             return
         self.label_trafico_valor.config(text=f"{valor} req/s")
 
-    def _on_toggle_autoescalado(self):
-        if self.autoescalado_activo.get():
-            self.log("🤖 Auto-scaling AUTOMÁTICO activado.")
+    def alternar_autoescalado(self):
+        self.autoescalado_activo = not self.autoescalado_activo
+        self._actualizar_boton_toggle()
+        if self.autoescalado_activo:
+            self.log("🟢 Auto-scaling AUTOMÁTICO activado (el sistema escala solo).")
         else:
-            self.log("🕹 Auto-scaling DESACTIVADO (modo manual).")
+            self.log("🔴 Auto-scaling APAGADO (Modo manual: tú controlas el clúster con los botones).")
             self.segundos_sobrecarga_75 = 0
             self.segundos_sobrecarga_90 = 0
             self.segundos_subutilizado_30 = 0
+
+    def _actualizar_boton_toggle(self):
+        if self.autoescalado_activo:
+            self.btn_toggle_auto.config(
+                text="🟢 Auto-scaling: ACTIVADO",
+                bg="#1b4d2e",
+                fg="#7ee787",
+                activebackground="#256e42",
+                activeforeground="#ffffff",
+            )
+        else:
+            self.btn_toggle_auto.config(
+                text="🔴 Auto-scaling: APAGADO (Manual)",
+                bg="#4d1b1b",
+                fg="#ff7b72",
+                activebackground="#6e2525",
+                activeforeground="#ffffff",
+            )
 
     def log(self, mensaje):
         self.texto_log.config(state="normal")
@@ -390,13 +418,13 @@ class SimuladorClusterApp:
             if n.ticks_sobrecargado >= TICKS_PARA_CAER and not n.caido:
                 n.caido = True
                 self.log(
-                    f"❌ Nodo {n.id} CAYÓ: sobrecarga sostenida provocó timeouts repetidos."
+                    f"❌ Nodo {n.id} CAYÓ: 3 segundos continuos sobrecargado provocaron caída por timeout."
                 )
 
         # Chequeo de caída total
         if self.nodos and not self.nodos_activos():
             if not getattr(self, "_ya_avise_caida_total", False):
-                self.log("🔴 CAÍDA TOTAL DEL SERVICIO: no queda ningún nodo activo.")
+                self.log("🔴 CAÍDA TOTAL DEL SERVICIO: No queda ningún servidor activo para atender la venta de boletos.")
                 self._ya_avise_caida_total = True
         else:
             self._ya_avise_caida_total = False
@@ -414,11 +442,11 @@ class SimuladorClusterApp:
                 n.tiempo_respuesta = 3000
 
     # ------------------------------------------------------------------
-    # 3. Motor de Auto-scaling (Jerarquía Estricta: Vertical -> Horizontal)
+    # 3. Motor de Auto-scaling (Jerarquía Estricta en 2 Ticks)
     # ------------------------------------------------------------------
     def _evaluar_autoescalado(self):
         """Evalúa las reglas de decisión de autoescalamiento jerárquico."""
-        if not self.autoescalado_activo.get():
+        if not self.autoescalado_activo:
             return
 
         activos = self.nodos_activos()
@@ -472,7 +500,7 @@ class SimuladorClusterApp:
                             self.segundos_sobrecarga_90 = 0
                     else:
                         if not self._alerta_limite_max_avisada:
-                            self.log("🚨 LÍMITE MÁXIMO ALCANZADO: Nivel 5 con 8 nodos y U >= 90%. Clúster al tope.")
+                            self.log("🚨 LÍMITE MÁXIMO ALCANZADO: Nivel 5 con 8 servidores y U >= 90%. Clúster al tope.")
                             self._alerta_limite_max_avisada = True
 
         # --- B. REGLA DESESCALAMIENTO CONTINUO HACIA ABAJO (al 10mo tick sostenido <= 30%) ---
@@ -501,7 +529,7 @@ class SimuladorClusterApp:
         if not self.nodos or not activos:
             estado_txt, color = "🔴 CAÍDA TOTAL", "#ff5555"
         elif any(n.caido for n in self.nodos):
-            estado_txt, color = "🟠 DEGRADADO (nodo caído)", "#ffb454"
+            estado_txt, color = "🟠 DEGRADADO (servidor caído)", "#ffb454"
         elif u >= 1.0 or any(n.utilizacion() >= 1.0 for n in activos):
             estado_txt, color = "🔴 CRÍTICO (Sobrecarga)", "#ff5555"
         elif u >= 0.75:
@@ -513,9 +541,9 @@ class SimuladorClusterApp:
         self.label_utilizacion.config(text=f"Utilización promedio (U): {u * 100:.1f}%")
 
         # Texto informativo del auto-scaler
-        if not self.autoescalado_activo.get():
-            info_auto = "Auto-scaler: DESACTIVADO (Manual)"
-            color_auto = "#888888"
+        if not self.autoescalado_activo:
+            info_auto = "Auto-scaler: 🔴 APAGADO (Modo Manual)"
+            color_auto = "#ff7b72"
         elif self.cooldown_vertical > 0:
             info_auto = f"Auto-scaler: ❄ Cooldown Vertical ({self.cooldown_vertical}s)"
             color_auto = "#64b5f6"
@@ -532,7 +560,7 @@ class SimuladorClusterApp:
             info_auto = f"Auto-scaler: 🔽 Evaluando Desescalado ({self.segundos_subutilizado_30}/{SEGUNDOS_IN}s)"
             color_auto = "#81c784"
         else:
-            info_auto = "Auto-scaler: 🤖 Activo · Estable"
+            info_auto = "Auto-scaler: 🟢 Activo · Monitoreando"
             color_auto = "#7ee787"
 
         self.label_auto_info.config(text=info_auto, foreground=color_auto)
@@ -546,7 +574,7 @@ class SimuladorClusterApp:
             text=f"Nivel vertical: L{nivel_actual} ({NOMBRE_POR_NIVEL.get(nivel_actual, '?')})"
         )
         self.label_costo.config(text=f"Costo relativo: x{COSTO_POR_NIVEL.get(nivel_actual, '?')}")
-        self.label_nodos.config(text=f"Nodos activos: {len(activos)} / {len(self.nodos)}")
+        self.label_nodos.config(text=f"Servidores activos: {len(activos)} / {len(self.nodos)}")
 
         capacidad_total = sum(n.capacidad() for n in activos)
         self.label_capacidad.config(text=f"Capacidad total activa: {capacidad_total:.0f} req/s")
@@ -582,10 +610,10 @@ class SimuladorClusterApp:
         y_30 = base_y - (0.30 * area_altura)
 
         self.canvas.create_line(10, y_75, ancho - 10, y_75, fill="#ffb74d", dash=(2, 4), width=1)
-        self.canvas.create_text(60, y_75 - 8, text="Umbral Up (75%)", fill="#ffb74d", font=("TkDefaultFont", 8))
+        self.canvas.create_text(65, y_75 - 8, text="Umbral Subida (75%)", fill="#ffb74d", font=("TkDefaultFont", 8))
 
         self.canvas.create_line(10, y_30, ancho - 10, y_30, fill="#81c784", dash=(2, 4), width=1)
-        self.canvas.create_text(60, y_30 - 8, text="Umbral Down (30%)", fill="#81c784", font=("TkDefaultFont", 8))
+        self.canvas.create_text(65, y_30 - 8, text="Umbral Ahorro (30%)", fill="#81c784", font=("TkDefaultFont", 8))
 
         n = max(len(self.nodos), 1)
         ancho_disponible = ancho - 20
@@ -630,7 +658,7 @@ class SimuladorClusterApp:
             self.canvas.create_text(
                 centro_x,
                 base_y + 16,
-                text=f"Nodo {nodo.id}",
+                text=f"Servidor {nodo.id}",
                 fill="#e6e6e6",
                 font=("TkDefaultFont", 9, "bold"),
             )
@@ -652,9 +680,9 @@ class SimuladorClusterApp:
     # ------------------------------------------------------------------
     # Acciones de escalamiento y operaciones
     # ------------------------------------------------------------------
-    def simular_pico(self):
+    def simular_pico_concierto(self):
         self.pico_restante = 6
-        self.log("⚡ Pico de tráfico simulado (~2.5x durante 6 segundos).")
+        self.log("🎟 [VENTA DE CONCIERTO]: ¡Inició la preventa! Miles de fans entran a la fila virtual (~2.5x tráfico por 6 segundos).")
 
     def alternar_pausa(self):
         self.corriendo = not self.corriendo
@@ -669,9 +697,9 @@ class SimuladorClusterApp:
                 n.categoria_previa = "ok"
                 reparados += 1
         if reparados:
-            self.log(f"🛠 Se repararon {reparados} nodo(s) caído(s).")
+            self.log(f"🛠 Se repararon {reparados} servidor(es) caído(s).")
         else:
-            self.log("🛠 No había nodos caídos que reparar.")
+            self.log("🛠 No había servidores caídos que reparar.")
 
     def reiniciar_todo(self):
         self._crear_nodos_iniciales(NODOS_MINIMOS)
@@ -701,7 +729,7 @@ class SimuladorClusterApp:
         nivel_actual = self.nodos[0].nivel
         origen = "🤖 Auto-scaling [Scale-Up]" if automatico else "🔼 Escalamiento VERTICAL (manual)"
         self.log(
-            f"{origen} → Todos los nodos suben a L{nivel_actual} "
+            f"{origen} → Todos los servidores suben a L{nivel_actual} "
             f"({NOMBRE_POR_NIVEL[nivel_actual]}), costo x{COSTO_POR_NIVEL[nivel_actual]}."
         )
         self._log_comparacion_rt(antes, despues)
@@ -738,7 +766,7 @@ class SimuladorClusterApp:
             if not automatico:
                 messagebox.showinfo(
                     "Límite alcanzado",
-                    f"Ya tienes el máximo simulado de {NODOS_MAXIMOS} nodos en el clúster.",
+                    f"Ya tienes el máximo simulado de {NODOS_MAXIMOS} servidores en el clúster.",
                 )
             return
 
@@ -758,7 +786,7 @@ class SimuladorClusterApp:
         despues = self.tiempo_respuesta_promedio()
 
         origen = "🤖 Auto-scaling [Scale-Out]" if automatico else "➕ Escalamiento HORIZONTAL (manual)"
-        self.log(f"{origen} → Nodo {self.contador_ids} añadido. Nodos en el clúster: {len(self.nodos)}.")
+        self.log(f"{origen} → Servidor {self.contador_ids} añadido. Servidores en el clúster: {len(self.nodos)}.")
         self._log_comparacion_rt(antes, despues)
 
     def desescalar_horizontal(self, automatico=False):
@@ -766,7 +794,7 @@ class SimuladorClusterApp:
             if not automatico:
                 messagebox.showinfo(
                     "Límite mínimo",
-                    f"El clúster ya está en el mínimo seguro de {NODOS_MINIMOS} nodos.",
+                    f"El clúster ya está en el mínimo seguro de {NODOS_MINIMOS} servidores.",
                 )
             return
 
@@ -780,7 +808,7 @@ class SimuladorClusterApp:
         despues = self.tiempo_respuesta_promedio()
 
         origen = "🤖 Auto-scaling [Scale-In]" if automatico else "➖ Desescalamiento HORIZONTAL (manual)"
-        self.log(f"{origen} → Retirado Nodo {nodo_removido.id}. Nodos restantes: {len(self.nodos)}.")
+        self.log(f"{origen} → Retirado Servidor {nodo_removido.id}. Servidores restantes: {len(self.nodos)}.")
         self._log_comparacion_rt(antes, despues)
 
     def _log_comparacion_rt(self, antes, despues):
@@ -796,9 +824,9 @@ class SimuladorClusterApp:
 
         mensaje = (
             "Señales de que llegaste al límite de escalamiento vertical:\n\n"
-            "1. Ya estás en el tipo de instancia más grande disponible (L5).\n"
+            "1. Ya estás en el tipo de servidor más potente disponible (L5 - m5.8xlarge).\n"
             "2. El costo crece más rápido que el rendimiento.\n"
-            "3. Se activa el escalamiento HORIZONTAL para seguir creciendo si la carga >= 90%."
+            "3. Se activa el escalamiento HORIZONTAL para agregar más servidores si la carga >= 90%."
         )
         if not silencioso:
             messagebox.showwarning("Tope de escalamiento vertical alcanzado", mensaje)
